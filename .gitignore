@@ -1,0 +1,14 @@
+# Python venv
+venv/
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 編輯器設定
+.vscode/
+.idea/
+.DS_Store
