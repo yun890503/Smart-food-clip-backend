@@ -305,7 +305,7 @@ def clip_event(clip_id: int, payload: dict):
             conn.commit()
 
             title = "保存計時開始"
-            msg = f"「{current_food}」保存計時已開始，共 {new_expire} 天。"
+            msg = f"{current_food}保存計時已開始，共 {new_expire} 天。"
             # 綠色
             send_line_bubble(title, msg, "#4CAF50")
 
@@ -319,7 +319,7 @@ def clip_event(clip_id: int, payload: dict):
 
             days_left = days_left_from_esp or 0
             title = "⚠ 即將到期"
-            msg = f"「{current_food}」即將到期，約剩 {days_left} 天，請儘快食用。"
+            msg = f"{current_food}即將到期，約剩 {days_left} 天，請儘快食用。"
             # 橘色
             send_line_bubble(title, msg, "#FF9800")
 
@@ -332,7 +332,7 @@ def clip_event(clip_id: int, payload: dict):
             conn.commit()
 
             title = "❌ 食品已過期"
-            msg = f"「{current_food}」已超過保存期限，請確認是否丟棄。"
+            msg = f"{current_food}已超過保存期限，請確認是否丟棄。"
             # 紅色
             send_line_bubble(title, msg, "#F44336")
 
