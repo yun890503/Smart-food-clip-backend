@@ -152,9 +152,12 @@ def list_clips(owner_id: Optional[int] = Query(None)):
     cur.close()
     conn.close()
     return rows
-    
+
 # ==========================
 # 7) 綁定夾子給使用者
+# ==========================
+# ==========================
+# 7) 自動新增 + 綁定夾子給使用者
 # ==========================
 @app.post("/bind_clip")
 def bind_clip(payload: dict):
@@ -165,25 +168,50 @@ def bind_clip(payload: dict):
         raise HTTPException(status_code=400, detail="user_id & clip_id are required")
 
     conn = db_conn()
+    # 用 dictionary=True 比較好讀欄位
     cur = conn.cursor(dictionary=True)
 
     try:
-        # 先確認這顆夾子存在
+        # 先看 DB 有沒有這顆夾子
         cur.execute("SELECT id, owner_id FROM clip_settings WHERE id = %s", (clip_id,))
         row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="clip not found")
 
-        # 如果已經被別人綁走，就不給綁
+        # ❶ 如果沒有 → 自動新增一筆 + 綁定給這個 user
+        if not row:
+            cur.execute("""
+                INSERT INTO clip_settings
+                    (id, owner_id, current_food, start_date, status, expire_days, days_left)
+                VALUES
+                    (%s, %s, NULL, NULL, %s, %s, NULL)
+            """, (
+                clip_id,
+                user_id,
+                "idle",   # 初始狀態：尚未開始計時
+                0,        # 尚未設定保存天數
+            ))
+            conn.commit()
+            return {
+                "message": "created_and_bound",
+                "clip_id": clip_id,
+                "user_id": user_id,
+            }
+
+        # ❷ 如果有 → 看是不是已經被別人綁走
         existing_owner = row.get("owner_id")
-        if existing_owner is not None and existing_owner != user_id:
+
+        # 已經被「別人」綁定了
+        if existing_owner is not None and str(existing_owner) != str(user_id):
             raise HTTPException(status_code=400, detail="clip already bound by another user")
 
-        # 如果 owner_id 已經是自己，就當作成功（idempotent）
-        if existing_owner == user_id:
-            return {"message": "already bound", "clip_id": clip_id, "user_id": user_id}
+        # 已經被「自己」綁定過 → 當作成功（idempotent）
+        if str(existing_owner) == str(user_id):
+            return {
+                "message": "already_bound",
+                "clip_id": clip_id,
+                "user_id": user_id,
+            }
 
-        # 寫入 owner_id
+        # ❸ 有這顆夾子，但 owner_id 還是 NULL → 幫他綁上去
         cur.execute("""
             UPDATE clip_settings
             SET owner_id = %s
@@ -191,7 +219,11 @@ def bind_clip(payload: dict):
         """, (user_id, clip_id))
         conn.commit()
 
-        return {"message": "bound", "clip_id": clip_id, "user_id": user_id}
+        return {
+            "message": "bound",
+            "clip_id": clip_id,
+            "user_id": user_id,
+        }
 
     finally:
         cur.close()
