@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import mysql.connector
 from datetime import datetime, date, timedelta
 import requests
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI()
 
@@ -112,24 +114,88 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str 
 # 1) GET /clips
 # ==========================
 @app.get("/clips")
-def list_clips():
+def list_clips(owner_id: Optional[int] = Query(None)):
     conn = db_conn()
     cur = conn.cursor(dictionary=True)
-    cur.execute("""
-        SELECT
-            id,
-            current_food,
-            start_date,
-            status,
-            expire_days,
-            days_left
-        FROM clip_settings
-        ORDER BY id
-    """)
+
+    if owner_id is None:
+        # 沒有傳 owner_id：回傳全部（維持相容）
+        cur.execute("""
+            SELECT
+                id,
+                owner_id,
+                current_food,
+                start_date,
+                status,
+                expire_days,
+                days_left
+            FROM clip_settings
+            ORDER BY id
+        """)
+    else:
+        # 有傳 owner_id：只回傳該使用者的夾子
+        cur.execute("""
+            SELECT
+                id,
+                owner_id,
+                current_food,
+                start_date,
+                status,
+                expire_days,
+                days_left
+            FROM clip_settings
+            WHERE owner_id = %s
+            ORDER BY id
+        """, (owner_id,))
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return rows
+    
+# ==========================
+# 7) 綁定夾子給使用者
+# ==========================
+@app.post("/bind_clip")
+def bind_clip(payload: dict):
+    user_id = payload.get("user_id")
+    clip_id = payload.get("clip_id")
+
+    if not user_id or not clip_id:
+        raise HTTPException(status_code=400, detail="user_id & clip_id are required")
+
+    conn = db_conn()
+    cur = conn.cursor(dictionary=True)
+
+    try:
+        # 先確認這顆夾子存在
+        cur.execute("SELECT id, owner_id FROM clip_settings WHERE id = %s", (clip_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="clip not found")
+
+        # 如果已經被別人綁走，就不給綁
+        existing_owner = row.get("owner_id")
+        if existing_owner is not None and existing_owner != user_id:
+            raise HTTPException(status_code=400, detail="clip already bound by another user")
+
+        # 如果 owner_id 已經是自己，就當作成功（idempotent）
+        if existing_owner == user_id:
+            return {"message": "already bound", "clip_id": clip_id, "user_id": user_id}
+
+        # 寫入 owner_id
+        cur.execute("""
+            UPDATE clip_settings
+            SET owner_id = %s
+            WHERE id = %s
+        """, (user_id, clip_id))
+        conn.commit()
+
+        return {"message": "bound", "clip_id": clip_id, "user_id": user_id}
+
+    finally:
+        cur.close()
+        conn.close()
 
 # ==========================
 # 2) GET /clips/{id}
