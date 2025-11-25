@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import mysql.connector
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import requests
 
 app = FastAPI()
@@ -29,13 +29,27 @@ def db_conn():
 # ====== LINE 推播 ======
 LINE_CHANNEL_TOKEN = "2lozxJOvVLXD7lYR8T/SfT0SIfShfXuOrw7Nd0rHg3t9HZoTKJwmOaSH7Yvcgus/ZLzdpg2005w4A1SEMT9FFonU5ZnTR1N+75dard1O4oYoaukDEySHGlJbadLIs5LSIc2YOOsnl3TrDgZbpImYYgdB04t89/1O/w1cDnyilFU="
 LINE_USER_ID = "U5e7511e60c22086da3ae3b68b389766b"
+WEB_BASE_URL = "https://smart-food-clip-frontend.zeabur.app/"
 
-def send_line_bubble(title: str, message: str, color: str = "#4CAF50"):
-    url = "https://api.line.me/v2/bot/message/push"
+def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str | None = None):
+    """
+    用 LINE Messaging API 推送 Flex Bubble 給固定 USER_ID
+    title  : 上面大的標題
+    message: 下面內文
+    color  : 標題文字顏色（綠 / 橘 / 紅）
+    url    : 點整個 Bubble 要開啟的網址（預設為 WEB_BASE_URL）
+    """
+    if url is None:
+        url = WEB_BASE_URL
+
+    url = url or WEB_BASE_URL  # 再保險一次
+
+    api_url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
     }
+
     payload = {
         "to": LINE_USER_ID,
         "messages": [
@@ -44,10 +58,16 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50"):
                 "altText": "智慧保鮮夾提醒",
                 "contents": {
                     "type": "bubble",
+                    # ⭐ 在 bubble 的 body 上掛 action => 點整塊會開網址
                     "body": {
                         "type": "box",
                         "layout": "vertical",
                         "spacing": "md",
+                        "action": {          # ← 這一段就是點擊跳轉
+                            "type": "uri",
+                            "label": "查看詳情",
+                            "uri": url,
+                        },
                         "contents": [
                             {
                                 "type": "text",
@@ -56,7 +76,10 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50"):
                                 "size": "lg",
                                 "color": color,
                             },
-                            {"type": "separator", "margin": "md"},
+                            {
+                                "type": "separator",
+                                "margin": "md",
+                            },
                             {
                                 "type": "text",
                                 "text": message,
@@ -70,11 +93,13 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50"):
             }
         ],
     }
+
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=5)
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=5)
         print("LINE status:", resp.status_code, resp.text)
     except Exception as e:
         print("❌ LINE Bubble 推播失敗：", e)
+
 
 # ==========================
 # 1) GET /clips
@@ -237,10 +262,21 @@ def clip_event(clip_id: int, payload: dict):
 
         current_food = row.get("current_food") or "未命名食品"
         expire_days_db = row.get("expire_days")
+        start_date_db = row.get("start_date")
+
+        # 如果 start_date 是 datetime，把它轉成 date
+        if isinstance(start_date_db, datetime):
+            start_date_db = start_date_db.date()
 
         # ===== START =====
         if event == "start":
             new_expire_days = expire_days_from_esp or expire_days_db or 0
+            today = date.today()
+
+            # ⭐ 預計到期日
+            expire_date = today + timedelta(days=int(new_expire_days))
+            expire_date_str = expire_date.strftime("%Y-%m-%d")
+
             cur.execute("""
                 UPDATE clip_settings
                 SET start_date = %s,
@@ -249,25 +285,25 @@ def clip_event(clip_id: int, payload: dict):
                     status      = %s
                 WHERE id = %s
             """, (
-                date.today(),
+                today,
                 new_expire_days,
-                days_left_from_esp,  # ⭐ ESP32 傳來的
+                days_left_from_esp,
                 "counting",
                 clip_id,
             ))
             conn.commit()
 
+            # ⭐ LINE 通知帶上到期日
             send_line_bubble(
                 "保存計時開始",
-                f"{current_food}保存計時已開始，共 {new_expire_days} 天。",
+                f"{current_food} 保存計時已開始，共 {new_expire_days} 天。\n"
+                f"預計到期日：{expire_date_str}",
                 "#4CAF50"
             )
-        # ===== UPDATE：一般每天更新剩餘天數（不發 LINE）=====
+
+        # ===== UPDATE（每天更新，通常不推 LINE） =====
         elif event == "update":
-            # 如果 ESP 有傳 days_left，就更新；沒傳就用原本 DB 的
-            new_days_left = days_left_from_esp
-            if new_days_left is None:
-                new_days_left = row.get("days_left")
+            new_days_left = days_left_from_esp if days_left_from_esp is not None else row.get("days_left")
 
             cur.execute("""
                 UPDATE clip_settings
@@ -275,10 +311,19 @@ def clip_event(clip_id: int, payload: dict):
                 WHERE id = %s
             """, (new_days_left, clip_id))
             conn.commit()
-            # 不發 LINE，只是同步資料
 
-        # ===== EXPIRING =====
+        # ===== EXPIRING（7天 → 今日剩 ≤7） =====
         elif event == "expiring":
+            effective_expire_days = expire_days_db or expire_days_from_esp
+
+            # ⭐ 計算真正的到期日
+            expire_date = (
+                start_date_db + timedelta(days=int(effective_expire_days))
+                if (start_date_db and effective_expire_days)
+                else None
+            )
+            expire_date_str = expire_date.strftime("%Y-%m-%d") if expire_date else "未知"
+
             cur.execute("""
                 UPDATE clip_settings
                 SET status = %s,
@@ -289,12 +334,20 @@ def clip_event(clip_id: int, payload: dict):
 
             send_line_bubble(
                 "⚠ 即將到期",
-                f"{current_food}即將到期，約剩 {days_left_from_esp} 天。",
+                f"{current_food} 即將到期（剩 {days_left_from_esp} 天）。\n"
+                f"預計到期日：{expire_date_str}",
                 "#FF9800"
             )
 
-        # ===== EXPIRED =====
+        # ===== EXPIRED（days_left <= 0） =====
         elif event == "expired":
+            expire_date = (
+                start_date_db + timedelta(days=int(expire_days_db))
+                if (start_date_db and expire_days_db)
+                else None
+            )
+            expire_date_str = expire_date.strftime("%Y-%m-%d") if expire_date else "未知"
+
             cur.execute("""
                 UPDATE clip_settings
                 SET status = %s,
@@ -305,7 +358,8 @@ def clip_event(clip_id: int, payload: dict):
 
             send_line_bubble(
                 "❌ 食品已過期",
-                f"{current_food}已超過保存期限。",
+                f"{current_food} 已超過保存期限。\n"
+                f"原預計到期日：{expire_date_str}",
                 "#F44336"
             )
 
