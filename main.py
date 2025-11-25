@@ -33,16 +33,11 @@ WEB_BASE_URL = "https://smart-food-clip-frontend.zeabur.app/"
 
 def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str | None = None):
     """
-    用 LINE Messaging API 推送 Flex Bubble 給固定 USER_ID
-    title  : 上面大的標題
-    message: 下面內文
-    color  : 標題文字顏色（綠 / 橘 / 紅）
-    url    : 點整個 Bubble 要開啟的網址（預設為 WEB_BASE_URL）
+    使用 Flex Bubble 推送訊息
+    並在最底部加入「查看詳情」按鈕
     """
     if url is None:
         url = WEB_BASE_URL
-
-    url = url or WEB_BASE_URL  # 再保險一次
 
     api_url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -58,16 +53,10 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str 
                 "altText": "智慧保鮮夾提醒",
                 "contents": {
                     "type": "bubble",
-                    # ⭐ 在 bubble 的 body 上掛 action => 點整塊會開網址
                     "body": {
                         "type": "box",
                         "layout": "vertical",
                         "spacing": "md",
-                        "action": {          # ← 這一段就是點擊跳轉
-                            "type": "uri",
-                            "label": "查看詳情",
-                            "uri": url,
-                        },
                         "contents": [
                             {
                                 "type": "text",
@@ -89,6 +78,23 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str 
                             },
                         ],
                     },
+                    # ⭐ 底部「查看詳情」色塊按鈕
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "color": "#4A90E2",  # 🔵 你要的底色（可改）
+                                "action": {
+                                    "type": "uri",
+                                    "label": "查看詳情",
+                                    "uri": url
+                                }
+                            }
+                        ]
+                    }
                 },
             }
         ],
@@ -99,6 +105,7 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str 
         print("LINE status:", resp.status_code, resp.text)
     except Exception as e:
         print("❌ LINE Bubble 推播失敗：", e)
+
 
 
 # ==========================
