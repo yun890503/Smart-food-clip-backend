@@ -114,7 +114,7 @@ def send_line_bubble(title: str, message: str, color: str = "#4CAF50", url: str 
 # 1) GET /clips
 # ==========================
 @app.get("/clips")
-def list_clips(owner_id: Optional[int] = Query(None)):
+def list_clips(owner_id: Optional[str] = Query(None)):
     conn = db_conn()
     cur = conn.cursor(dictionary=True)
 
