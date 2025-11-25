@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import mysql.connector
 from datetime import datetime, date
+import requests  # 👈 新增，用來打 LINE API
 
 app = FastAPI()
 
@@ -36,11 +37,11 @@ def compute_days_left(start_date, expire_days):
 def calc_days_left(row: dict):
     """
     統一計算 days_left：
-    days_left = safe_days - 已經過的天數
+    days_left = expire_days - 已經過的天數
     """
     start = row.get("start_date")
-    safe_days = row.get("safe_days")
-    if start is None or safe_days is None:
+    expire_days = row.get("expire_days")
+    if start is None or expire_days is None:
         return None
 
     # start_date 可能是 datetime 或 date
@@ -51,7 +52,34 @@ def calc_days_left(row: dict):
 
     today = date.today()
     passed = (today - start_date).days  # 已經過幾天（今天 - 開始日）
-    return safe_days - passed
+    return expire_days - passed
+
+
+# ====== LINE 推播（後端代打） ======
+
+LINE_CHANNEL_TOKEN = "2lozxJOvVLXD7lYR8T/SfT0SIfShfXuOrw7Nd0rHg3t9HZoTKJwmOaSH7Yvcgus/ZLzdpg2005w4A1SEMT9FFonU5ZnTR1N+75dard1O4oYoaukDEySHGlJbadLIs5LSIc2YOOsnl3TrDgZbpImYYgdB04t89/1O/w1cDnyilFU="
+LINE_USER_ID = "U5e7511e60c22086da3ae3b68b389766b"  # 先固定你自己，之後再做多使用者
+
+def send_line_text(message: str):
+    """
+    用 LINE Messaging API 推一則文字訊息給固定 USER_ID
+    """
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
+    }
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {"type": "text", "text": message}
+        ]
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=5)
+        print("LINE status:", resp.status_code, resp.text)
+    except Exception as e:
+        print("❌ LINE 推播失敗：", e)
 
 
 # 1) 取得所有夾子列表（➜ 加上 expire_days & days_left）
@@ -150,7 +178,7 @@ def delete_clip(clip_id: int):
 
     return {"message": "deleted", "id": clip_id}
 
-# 3) 新增夾子（POST）
+# 5) 新增夾子（POST）
 @app.post("/clips")
 def create_clip(payload: dict):
     try:
@@ -187,3 +215,87 @@ def create_clip(payload: dict):
         print("❌ create_clip error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# 6) ⭐ ESP32 回報事件：start / expiring / expired
+@app.post("/clips/{clip_id}/event")
+def clip_event(clip_id: int, payload: dict):
+    """
+    ESP32 用：
+      - event: "start" / "expiring" / "expired"
+      - expire_days: （選填）開始時可以順便更新總天數
+      - days_left: （選填）如果 ESP 有算，也可以回報
+    """
+    event = payload.get("event")
+    expire_days_from_esp = payload.get("expire_days")
+    days_left_from_esp = payload.get("days_left")
+
+    if event not in ("start", "expiring", "expired"):
+        raise HTTPException(status_code=400, detail="invalid event type")
+
+    conn = db_conn()
+    cur = conn.cursor(dictionary=True)
+
+    try:
+        # 先抓出資料
+        cur.execute("SELECT * FROM clip_settings WHERE id = %s", (clip_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="clip not found")
+
+        # 目前資料
+        current_food = row.get("current_food") or "未命名食品"
+        expire_days = row.get("expire_days")
+
+        # 如果是 start，可以更新 start_date & expire_days
+        if event == "start":
+            new_expire_days = expire_days_from_esp if expire_days_from_esp is not None else expire_days
+            if new_expire_days is None:
+                new_expire_days = 0
+
+            cur.execute(
+                """
+                UPDATE clip_settings
+                SET start_date = %s,
+                    expire_days = %s,
+                    status = %s
+                WHERE id = %s
+                """,
+                (date.today(), new_expire_days, "counting", clip_id)
+            )
+            conn.commit()
+
+            msg = f"「{current_food}」保存計時已開始，設定 {new_expire_days} 天。"
+            send_line_text(msg)
+
+        elif event == "expiring":
+            # 可選：更新 status
+            cur.execute(
+                "UPDATE clip_settings SET status = %s WHERE id = %s",
+                ("expiring", clip_id)
+            )
+            conn.commit()
+
+            # 算一下剩餘天數（優先用 ESP 回報，沒有就後端算）
+            if days_left_from_esp is not None:
+                days_left = days_left_from_esp
+            else:
+                days_left = calc_days_left(row)
+
+            msg = f"「{current_food}」即將到期，約剩 {days_left} 天，請儘快食用。"
+            send_line_text(msg)
+
+        elif event == "expired":
+            cur.execute(
+                "UPDATE clip_settings SET status = %s WHERE id = %s",
+                ("expired", clip_id)
+            )
+            conn.commit()
+
+            msg = f"「{current_food}」已過期，請確認是否丟棄。"
+            send_line_text(msg)
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"message": "event updated", "id": clip_id, "event": event}
