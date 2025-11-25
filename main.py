@@ -60,26 +60,62 @@ def calc_days_left(row: dict):
 LINE_CHANNEL_TOKEN = "2lozxJOvVLXD7lYR8T/SfT0SIfShfXuOrw7Nd0rHg3t9HZoTKJwmOaSH7Yvcgus/ZLzdpg2005w4A1SEMT9FFonU5ZnTR1N+75dard1O4oYoaukDEySHGlJbadLIs5LSIc2YOOsnl3TrDgZbpImYYgdB04t89/1O/w1cDnyilFU="
 LINE_USER_ID = "U5e7511e60c22086da3ae3b68b389766b"  # 先固定你自己，之後再做多使用者
 
-def send_line_text(message: str):
+def send_line_bubble(title: str, message: str, color: str = "#4CAF50"):
     """
-    用 LINE Messaging API 推一則文字訊息給固定 USER_ID
+    用 LINE Messaging API 推送 Flex Bubble 給固定 USER_ID
+    title  : 上面大的標題
+    message: 下面內文
+    color  : 標題文字顏色（綠 / 橘 / 紅）
     """
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
     }
+
     payload = {
         "to": LINE_USER_ID,
         "messages": [
-            {"type": "text", "text": message}
-        ]
+            {
+                "type": "flex",
+                "altText": "智慧保鮮夾提醒",
+                "contents": {
+                    "type": "bubble",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "md",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": title,
+                                "weight": "bold",
+                                "size": "lg",
+                                "color": color,
+                            },
+                            {
+                                "type": "separator",
+                                "margin": "md",
+                            },
+                            {
+                                "type": "text",
+                                "text": message,
+                                "wrap": True,
+                                "margin": "md",
+                                "size": "sm",
+                            },
+                        ],
+                    },
+                },
+            }
+        ],
     }
+
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=5)
         print("LINE status:", resp.status_code, resp.text)
     except Exception as e:
-        print("❌ LINE 推播失敗：", e)
+        print("❌ LINE Bubble 推播失敗：", e)
 
 
 # 1) 取得所有夾子列表（➜ 加上 expire_days & days_left）
@@ -225,6 +261,8 @@ def clip_event(clip_id: int, payload: dict):
       - expire_days: （選填）開始時可以順便更新總天數
       - days_left: （選填）如果 ESP 有算，也可以回報
     """
+    from datetime import date
+
     event = payload.get("event")
     expire_days_from_esp = payload.get("expire_days")
     days_left_from_esp = payload.get("days_left")
@@ -236,21 +274,23 @@ def clip_event(clip_id: int, payload: dict):
     cur = conn.cursor(dictionary=True)
 
     try:
-        # 先抓出資料
         cur.execute("SELECT * FROM clip_settings WHERE id = %s", (clip_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="clip not found")
 
-        # 目前資料
         current_food = row.get("current_food") or "未命名食品"
         expire_days = row.get("expire_days")
 
-        # 如果是 start，可以更新 start_date & expire_days
+        # ====== START ======
         if event == "start":
-            new_expire_days = expire_days_from_esp if expire_days_from_esp is not None else expire_days
-            if new_expire_days is None:
-                new_expire_days = 0
+            new_expire = (
+                expire_days_from_esp
+                if expire_days_from_esp is not None
+                else expire_days
+            )
+            if new_expire is None:
+                new_expire = 0
 
             cur.execute(
                 """
@@ -260,42 +300,45 @@ def clip_event(clip_id: int, payload: dict):
                     status = %s
                 WHERE id = %s
                 """,
-                (date.today(), new_expire_days, "counting", clip_id)
+                (date.today(), new_expire, "counting", clip_id),
             )
             conn.commit()
 
-            msg = f"「{current_food}」保存計時已開始，設定 {new_expire_days} 天。"
-            send_line_text(msg)
+            title = "保存計時開始"
+            msg = f"「{current_food}」保存計時已開始，共 {new_expire} 天。"
+            # 綠色
+            send_line_bubble(title, msg, "#4CAF50")
 
+        # ====== EXPIRING ======
         elif event == "expiring":
-            # 可選：更新 status
             cur.execute(
                 "UPDATE clip_settings SET status = %s WHERE id = %s",
-                ("expiring", clip_id)
+                ("expiring", clip_id),
             )
             conn.commit()
 
-            # 算一下剩餘天數（優先用 ESP 回報，沒有就後端算）
-            if days_left_from_esp is not None:
-                days_left = days_left_from_esp
-            else:
-                days_left = calc_days_left(row)
-
+            days_left = days_left_from_esp or 0
+            title = "⚠ 即將到期"
             msg = f"「{current_food}」即將到期，約剩 {days_left} 天，請儘快食用。"
-            send_line_text(msg)
+            # 橘色
+            send_line_bubble(title, msg, "#FF9800")
 
+        # ====== EXPIRED ======
         elif event == "expired":
             cur.execute(
                 "UPDATE clip_settings SET status = %s WHERE id = %s",
-                ("expired", clip_id)
+                ("expired", clip_id),
             )
             conn.commit()
 
-            msg = f"「{current_food}」已過期，請確認是否丟棄。"
-            send_line_text(msg)
+            title = "❌ 食品已過期"
+            msg = f"「{current_food}」已超過保存期限，請確認是否丟棄。"
+            # 紅色
+            send_line_bubble(title, msg, "#F44336")
 
     finally:
         cur.close()
         conn.close()
 
-    return {"message": "event updated", "id": clip_id, "event": event}
+    return {"message": "event updated", "event": event}
+
