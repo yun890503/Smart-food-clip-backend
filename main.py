@@ -302,7 +302,7 @@ def clip_event(clip_id: int, payload: dict):
 
             # ⭐ LINE 通知帶上到期日
             send_line_bubble(
-                "保存計時開始",
+                "✅ 食品保存提醒",
                 f"{current_food} 保存計時已開始，共 {new_expire_days} 天。\n"
                 f"預計到期日：{expire_date_str}",
                 "#4CAF50"
